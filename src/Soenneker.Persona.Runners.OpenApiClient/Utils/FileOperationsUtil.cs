@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
 using Soenneker.Extensions.String;
 using Soenneker.Git.Util.Abstract;
+using Soenneker.OpenApi.Fixer.Abstract;
 using Soenneker.Persona.Runners.OpenApiClient.Utils.Abstract;
 using Soenneker.Utils.Dotnet.Abstract;
 using Soenneker.Utils.Environment;
@@ -36,9 +37,10 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     private readonly IFileDownloadUtil _fileDownloadUtil;
     private readonly IFileUtil _fileUtil;
     private readonly IDirectoryUtil _directoryUtil;
+    private readonly IOpenApiFixer _openApiFixer;
 
-    public FileOperationsUtil(ILogger<FileOperationsUtil> logger, IConfiguration configuration, IGitUtil gitUtil, IDotnetUtil dotnetUtil, IProcessUtil processUtil, 
-        IFileDownloadUtil fileDownloadUtil, IFileUtil fileUtil, IDirectoryUtil directoryUtil)
+    public FileOperationsUtil(ILogger<FileOperationsUtil> logger, IConfiguration configuration, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
+        IProcessUtil processUtil, IFileDownloadUtil fileDownloadUtil, IFileUtil fileUtil, IDirectoryUtil directoryUtil, IOpenApiFixer openApiFixer)
     {
         _logger = logger;
         _configuration = configuration;
@@ -48,11 +50,13 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         _fileDownloadUtil = fileDownloadUtil;
         _fileUtil = fileUtil;
         _directoryUtil = directoryUtil;
+        _openApiFixer = openApiFixer;
     }
 
     public async ValueTask Process(CancellationToken cancellationToken = default)
     {
-        string gitDirectory = await _gitUtil.CloneToTempDirectory($"https://github.com/soenneker/{Constants.Library.ToLowerInvariantFast()}", cancellationToken: cancellationToken);
+        string gitDirectory = await _gitUtil.CloneToTempDirectory($"https://github.com/soenneker/{Constants.Library.ToLowerInvariantFast()}",
+            cancellationToken: cancellationToken);
 
         string targetFilePath = Path.Combine(gitDirectory, "openapi.json");
 
@@ -60,8 +64,14 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
         string openApiDocumentUrl = await GetOpenApiDocumentUrl(cancellationToken);
 
-        string? filePath = await _fileDownloadUtil.Download(openApiDocumentUrl,
-            targetFilePath, fileExtension: ".json", cancellationToken: cancellationToken);
+        string? filePath = await _fileDownloadUtil.Download(openApiDocumentUrl, targetFilePath, fileExtension: ".json", cancellationToken: cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new InvalidOperationException("Persona OpenAPI document download did not produce a file.");
+
+        string fixedFilePath = Path.Combine(gitDirectory, "fixed.json");
+
+        await _openApiFixer.Fix(filePath, fixedFilePath, cancellationToken);
 
         await _processUtil.Start("dotnet", null, "tool update --global Microsoft.OpenApi.Kiota", waitForExit: true, cancellationToken: cancellationToken);
 
@@ -69,10 +79,13 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
         await DeleteAllExceptCsproj(srcDirectory, cancellationToken);
 
-        await _processUtil.Start("kiota", gitDirectory, $"kiota generate -l CSharp -d \"{filePath}\" -o src/{Constants.Library} -c PersonaOpenApiClient -n {Constants.Library}",
-            waitForExit: true, cancellationToken: cancellationToken).NoSync();
+        await _processUtil.Start("kiota", gitDirectory,
+                              $"kiota generate -l CSharp -d \"{fixedFilePath}\" -o src/{Constants.Library} -c PersonaOpenApiClient -n {Constants.Library}",
+                              waitForExit: true, cancellationToken: cancellationToken)
+                          .NoSync();
 
-        await BuildAndPush(gitDirectory, cancellationToken).NoSync();
+        await BuildAndPush(gitDirectory, cancellationToken)
+            .NoSync();
     }
 
     private async ValueTask<string> GetOpenApiDocumentUrl(CancellationToken cancellationToken)
@@ -97,25 +110,17 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     {
         string repositoryDirectory = await _gitUtil.CloneToTempDirectory(_personaOpenApiRepositoryUrl, cancellationToken: cancellationToken);
 
-        try
-        {
-            List<string> directories = await _directoryUtil.GetAllDirectories(repositoryDirectory, cancellationToken);
+        List<string> directories = await _directoryUtil.GetAllDirectories(repositoryDirectory, cancellationToken);
 
-            string? latestFolder = directories
-                .Select(Path.GetFileName)
-                .Where(static folderName => !string.IsNullOrWhiteSpace(folderName) && _datedFolderRegex.IsMatch(folderName))
-                .OrderByDescending(static folderName => DateOnly.ParseExact(folderName!, "yyyy-MM-dd", CultureInfo.InvariantCulture))
-                .FirstOrDefault();
+        string? latestFolder = directories.Select(Path.GetFileName)
+                                          .Where(static folderName => !string.IsNullOrWhiteSpace(folderName) && _datedFolderRegex.IsMatch(folderName))
+                                          .OrderByDescending(static folderName => DateOnly.ParseExact(folderName!, "yyyy-MM-dd", CultureInfo.InvariantCulture))
+                                          .FirstOrDefault();
 
-            if (string.IsNullOrWhiteSpace(latestFolder))
-                throw new InvalidOperationException("Could not resolve the latest Persona OpenAPI folder from the cloned repository.");
+        if (string.IsNullOrWhiteSpace(latestFolder))
+            throw new InvalidOperationException("Could not resolve the latest Persona OpenAPI folder from the cloned repository.");
 
-            return latestFolder;
-        }
-        finally
-        {
-            await _directoryUtil.Delete(repositoryDirectory, cancellationToken);
-        }
+        return latestFolder;
     }
 
     public async ValueTask DeleteAllExceptCsproj(string directoryPath, CancellationToken cancellationToken = default)
