@@ -42,7 +42,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     private readonly IOpenApiFixer _openApiFixer;
 
     public FileOperationsUtil(ILogger<FileOperationsUtil> logger, IConfiguration configuration, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
-        IProcessUtil processUtil, IFileDownloadUtil fileDownloadUtil, IFileUtil fileUtil, IDirectoryUtil directoryUtil, IOpenApiFixer openApiFixer, IKiotaUtil kiotaUtil)
+        IProcessUtil processUtil, IFileDownloadUtil fileDownloadUtil, IFileUtil fileUtil, IDirectoryUtil directoryUtil, IKiotaUtil kiotaUtil, IOpenApiFixer openApiFixer)
     {
         _logger = logger;
         _configuration = configuration;
